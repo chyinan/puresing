@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Play, Pause, Square, Mic, Music, FileText, Download, Volume2, RefreshCcw, AlertCircle, X, Check, Trash2 } from 'lucide-react';
+import { Play, Pause, Square, Mic, Music, FileText, Download, Volume2, RefreshCcw, AlertCircle, X, Check, Trash2, Languages } from 'lucide-react';
 
 // --- 1. AudioWorklet 处理器代码 (作为字符串嵌入，运行在独立音频线程) ---
 const recorderWorkletCode = `
@@ -142,7 +142,7 @@ const parseTimeTag = (timeStr) => {
 
 const parseLrc = (lrcString) => {
   const lines = lrcString.split('\n');
-  const result = [];
+  const parsedLines = [];
   
   for (const line of lines) {
     const trimmed = line.trim();
@@ -184,14 +184,36 @@ const parseLrc = (lrcString) => {
         const fullText = processedWords.map(w => w.text).join('');
         const lineStartTime = processedWords[0].time;
 
-        result.push({
+        parsedLines.push({
             time: lineStartTime,
             text: fullText,
             words: processedWords
         });
     }
   }
-  return result.sort((a, b) => a.time - b.time);
+
+  // 合并同时间戳的连续行，视为原文 + 翻译
+  const sorted = parsedLines.sort((a, b) => a.time - b.time);
+  const merged = [];
+
+  for (let i = 0; i < sorted.length; i++) {
+    const line = sorted[i];
+    const next = sorted[i + 1];
+    const isTranslation = next && Math.abs(next.time - line.time) < 0.01;
+
+    if (isTranslation) {
+        merged.push({
+            ...line,
+            translationText: next.text,
+            translationWords: next.words
+        });
+        i++; // 跳过翻译行
+    } else {
+        merged.push(line);
+    }
+  }
+
+  return merged;
 };
 
 // --- 3.5 SRT 解析器 ---
@@ -403,6 +425,12 @@ export default function App() {
     const saved = localStorage.getItem('puresing_latencyOffset');
     return saved ? parseInt(saved, 10) : 0;
   }); // 手动延迟补偿 (ms)
+  const [lyricMode, setLyricMode] = useState(() => {
+    const saved = localStorage.getItem('puresing_lyricMode');
+    // 不再提供“翻译”单独模式，旧存档回退为双语
+    if (saved === 'translation') return 'bilingual';
+    return saved || 'bilingual';
+  }); // original / bilingual
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [vocalVolume, setVocalVolume] = useState(1.0);
@@ -481,6 +509,11 @@ export default function App() {
         gainNode.gain.setTargetAtTime(monitorMic ? 0.8 : 0, now, 0.1);
     }
   }, [monitorMic]);
+
+  // 持久化字幕模式
+  useEffect(() => {
+    localStorage.setItem('puresing_lyricMode', lyricMode);
+  }, [lyricMode]);
 
   // 高频渲染循环 (60FPS)
   const renderLoop = useCallback(() => {
@@ -566,7 +599,8 @@ export default function App() {
         }
 
         setLyrics(parsed);
-        showToast("歌词已加载");
+        const hasTranslation = parsed.some(l => l.translationText);
+        showToast(hasTranslation ? "检测到双语歌词，已支持模式切换" : "歌词已加载");
       };
       reader.readAsText(file);
     }
@@ -1074,27 +1108,29 @@ export default function App() {
   };
 
   const getNextText = () => {
-    if (currentLineIndex === -1 && lyrics.length > 0) return lyrics[0].text;
-    if (lyrics[currentLineIndex + 1]) return lyrics[currentLineIndex + 1].text;
-    return "— End —";
+    const target = currentLineIndex === -1 ? lyrics[0] : lyrics[currentLineIndex + 1];
+    if (!target) return "— End —";
+
+    const mode = lyricMode === 'translation' ? 'bilingual' : lyricMode; // 兼容旧存档
+
+    if (mode === 'bilingual' && target.translationText) {
+        return `${target.text} / ${target.translationText}`;
+    }
+    return target.text;
   };
 
-  const renderCurrentLine = () => {
-    if (currentLineIndex === -1 || !lyrics[currentLineIndex]) {
-        return <span className="text-slate-500 text-2xl">等待开始...</span>;
-    }
+  const renderWords = (lineWords) => {
+    if (!lineWords || lineWords.length === 0) return null;
 
-    const line = lyrics[currentLineIndex];
-
-    if (line.words.length <= 1) {
+    if (lineWords.length <= 1) {
         return (
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-300 via-pink-200 to-white">
-                {line.text}
+                {lineWords[0].text}
             </span>
         );
     }
 
-    return line.words.map((word, idx) => {
+    return lineWords.map((word, idx) => {
         const timeSinceStart = currentTime - word.time;
         let percentage = 0;
         
@@ -1129,6 +1165,30 @@ export default function App() {
             </span>
         );
     });
+  };
+
+  const renderCurrentLine = () => {
+    if (currentLineIndex === -1 || !lyrics[currentLineIndex]) {
+        return <span className="text-slate-500 text-2xl">等待开始...</span>;
+    }
+
+    const line = lyrics[currentLineIndex];
+
+    const original = { text: line.text, words: line.words };
+    const translation = line.translationText ? { text: line.translationText, words: line.translationWords } : null;
+
+    const mode = lyricMode === 'translation' ? 'bilingual' : lyricMode; // 兼容旧存档
+
+    if (mode === 'bilingual' && translation) {
+        return (
+            <div className="flex flex-col items-center gap-3">
+                <div>{renderWords(original.words)}</div>
+                <div className="text-lg text-slate-200">{renderWords(translation.words) || translation.text}</div>
+            </div>
+        );
+    }
+
+    return renderWords(original.words);
   };
 
   return (
@@ -1267,7 +1327,7 @@ export default function App() {
             />
 
             {/* 歌词展示 - 核心 KTV 模式 */}
-            <div className="flex-1 w-full flex flex-col items-center justify-center p-8 text-center gap-10 overflow-hidden">
+            <div className="flex-1 w-full flex flex-col items-center justify-center p-8 text-center gap-10 overflow-hidden relative">
                 {lyrics.length === 0 ? (
                     <div className="flex flex-col items-center gap-4 text-slate-600">
                         <Music size={64} className="opacity-20" />
@@ -1275,6 +1335,23 @@ export default function App() {
                     </div>
                 ) : (
                     <>
+                        <div className="absolute right-6 top-6 flex flex-col items-center gap-2 text-xs text-slate-300">
+                            <button
+                                onClick={() => setLyricMode(prev => prev === 'bilingual' ? 'original' : 'bilingual')}
+                                className={`w-10 h-10 rounded-full border flex items-center justify-center transition-all shadow-md ${
+                                    lyricMode === 'bilingual' 
+                                    ? 'bg-violet-600/80 border-violet-400 text-white hover:bg-violet-500' 
+                                    : 'bg-slate-800/70 border-slate-600 text-slate-200 hover:border-violet-400 hover:text-white'
+                                }`}
+                                title={lyricMode === 'bilingual' ? '当前：双语，点击切换原文' : '当前：原文，点击切换双语'}
+                                aria-label="切换字幕模式"
+                            >
+                                <Languages size={18} />
+                            </button>
+                            <span className="px-2 py-0.5 rounded-full bg-slate-800/60 border border-slate-600 text-[11px]">
+                                {lyricMode === 'bilingual' ? '双语' : '原文'}
+                            </span>
+                        </div>
                         {/* 当前句 - 逐字渲染 */}
                         <div className="min-h-[140px] flex flex-col justify-center animate-in slide-in-from-bottom-2 fade-in duration-500">
                             <span className="text-sm text-violet-400 font-medium tracking-widest mb-4 uppercase opacity-80">
